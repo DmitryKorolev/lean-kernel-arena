@@ -298,6 +298,7 @@ jobs:
       contents: read
       pages: write
       id-token: write
+      actions: read # to download the results of this run's jobs
 
     env:
       GH_TOKEN: ${{ github.token }}
@@ -325,11 +326,24 @@ jobs:
         run: "true"
         shell: 'nix develop -c bash -euxo pipefail {0}'
 
+      # Only the results of the checker jobs of this attempt: a re-run may
+      # reuse what an earlier attempt of the same run ran, whose artifact is
+      # still around, and whose results then differ from the reused ones.
+      # Each is downloaded by name into a directory of its own (download-artifact
+      # with a pattern unpacks a single match without one). A checker job that
+      # failed has no artifact.
       - name: Fetch checker results
-        uses: actions/download-artifact@v8
-        with:
-          pattern: results-*
-          path: _artifacts
+        run: |
+          gh run download "$GITHUB_RUN_ID" --name results-reused --dir _artifacts/results-reused
+          for checker in $(jq -r '.[].checker' <<< "$MATRIX"); do
+            if ! gh run download "$GITHUB_RUN_ID" --name "results-$checker" --dir "_artifacts/results-$checker"; then
+              echo "::warning::No results of checker $checker"
+              rm -rf "_artifacts/results-$checker"
+            fi
+          done
+        env:
+          GH_REPO: ${{ github.repository }}
+          MATRIX: ${{ needs.select.outputs.matrix }}
 
       - name: Fetch test stats
         uses: actions/download-artifact@v8
@@ -337,22 +351,9 @@ jobs:
           name: test-stats
           path: _artifacts/test-stats
 
-      # Only the results of the checker jobs of this attempt: a re-run may
-      # reuse what an earlier attempt of the same run ran, whose artifact is
-      # still around, and whose results then differ from the reused ones.
-      # A checker job that failed has no artifact.
       - name: Merge checker results and test stats
-        run: |
-          dirs=(_artifacts/results-reused _artifacts/test-stats)
-          for checker in $(jq -r '.[].checker' <<< "$MATRIX"); do
-            if [ -d "_artifacts/results-$checker" ]; then
-              dirs+=("_artifacts/results-$checker")
-            fi
-          done
-          ./lka.py ci-merge "${dirs[@]}"
+        run: ./lka.py ci-merge _artifacts/*
         shell: 'nix develop -c bash -euxo pipefail {0}'
-        env:
-          MATRIX: ${{ needs.select.outputs.matrix }}
 
       # All results of this build, fresh and reused, for later builds to reuse
       # (see .github/fetch-previous-results.sh)
